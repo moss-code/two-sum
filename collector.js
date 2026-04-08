@@ -9,6 +9,7 @@
  */
 
 const WebSocket = require('ws');
+const { chromium } = require("playwright");
 
 // 配置
 const CONFIG = {
@@ -49,66 +50,114 @@ const CONFIG = {
 /**
  * 从 WebSocket 获取在线人数
  */
-function getOnlineCount(region) {
-  return new Promise((resolve) => {
-    const url = CONFIG.WS_URLS[region];
-    const headers = CONFIG.WS_HEADERS[region] || {};
+async function getOnlineCount(region) {
+  console.log(`\n[${region}] --- 开始任务 ---`);
 
-    console.log(`[${region}] 连接中...`);
-
-    const ws = new WebSocket(url, {
-      headers: headers
-    });
-    let resolved = false;
-
-    // 超时处理
-    const timeout = setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        console.warn(`[${region}] 超时`);
-        ws.close();
-        resolve(null);
-      }
-    }, CONFIG.TIMEOUT);
-
-    ws.on('open', () => {
-      console.log(`[${region}] 已连接`);
-    });
-
-    ws.on('message', (data) => {
-      if (resolved) return;
-
-      const message = data.toString();
-      console.log(`[${region}] 收到消息: ${message}`);
-
-      const count = parseInt(message, 10);
-      if (!isNaN(count) && count >= 0) {
-        resolved = true;
-        clearTimeout(timeout);
-        ws.close();
-        console.log(`[${region}] ✅ 在线人数: ${count}`);
-        resolve(count);
-      }
-    });
-
-    ws.on('error', (error) => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timeout);
-        console.error(`[${region}] ❌ 错误:`, error.message);
-        resolve(null);
-      }
-    });
-
-    ws.on('close', () => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timeout);
-        console.log(`[${region}] 连接已关闭`);
-        resolve(null);
-      }
-    });
+  const browser = await chromium.launch({
+    headless: true, // 改为 true 挑战无头模式，若失败请改回 false
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      "--no-sandbox",
+      "--disable-web-security",
+    ],
+    executablePath: CONFIG.executablePath || undefined,
   });
+
+  try {
+    const context = await browser.newContext({
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+      viewport: { width: 1920, height: 1080 },
+    });
+
+    // 1. 注入 Stealth 脚本：抹除机器人痕迹
+    await context.addInitScript(() => {
+      // 抹除 webdriver
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      // 伪造 WebGL 渲染信息
+      const getParameter = WebGLRenderingContext.prototype.getParameter;
+      WebGLRenderingContext.prototype.getParameter = function (parameter) {
+        if (parameter === 37445) return "Intel Inc.";
+        if (parameter === 37446) return "Intel(R) Iris(R) Xe Graphics";
+        return getParameter.apply(this, arguments);
+      };
+      // 伪造 Chrome 运行环境
+      window.chrome = { runtime: {} };
+    });
+
+    const page = await context.newPage();
+
+    // 2. 转发浏览器内部日志到 Node.js 终端
+    page.on("console", (msg) => {
+      if (msg.text().includes("[WS]")) {
+        console.log(`  └─ [浏览器内部] ${msg.text()}`);
+      }
+    });
+
+    // 3. 环境预热：US 站必须先访问页面
+    console.log(`[${region}] 正在通过 https 访问主页以建立上下文...`);
+    const response = await page.goto(
+      region === "US"
+        ? "https://leetcode.com/problems/two-sum"
+        : "https://leetcode.cn/problems/two-sum",
+      { waitUntil: "domcontentloaded", timeout: 30000 },
+    );
+
+    console.log(
+      `[${region}] 页面加载完成，状态码: ${response.status()}，标题: "${await page.title()}"`,
+    );
+
+    // 4. 建立 WebSocket 连接
+    console.log(`[${region}] 正在浏览器内建立 WebSocket...`);
+    const result = await page.evaluate((wsUrl) => {
+      return new Promise((resolve) => {
+        console.log(`[WS] 尝试连接: ${wsUrl}`);
+        const socket = new WebSocket(wsUrl);
+
+        const timer = setTimeout(() => {
+          console.log("[WS] 握手超时");
+          socket.close();
+          resolve({ error: "TIMEOUT" });
+        }, 15000);
+
+        socket.onopen = () => {
+          console.log("[WS] 已开启 (OPEN)");
+          // 部分环境可能需要发个包激活，这里尝试发个空包
+          setTimeout(() => {
+            if (socket.readyState === 1) socket.send("");
+          }, 2000);
+        };
+
+        socket.onmessage = (e) => {
+          console.log(`[WS] 收到消息包: ${e.data}`);
+          const count = parseInt(e.data, 10);
+          if (!isNaN(count)) {
+            clearTimeout(timer);
+            socket.close();
+            resolve({ count: count });
+          }
+        };
+
+        socket.onerror = () => {
+          console.log("[WS] 报错");
+          resolve({ error: "ERROR" });
+        };
+      });
+    }, CONFIG.WS_URLS[region]);
+
+    if (result.count !== undefined) {
+      console.log(`[${region}] ✅ 采集成功: ${result.count}`);
+      return result.count;
+    } else {
+      console.error(`[${region}] ❌ 采集失败: ${result.error || "未知原因"}`);
+      return null;
+    }
+  } catch (err) {
+    console.error(`[${region}] 捕获到程序异常: ${err.message}`);
+    return null;
+  } finally {
+    await browser.close();
+  }
 }
 
 /**
