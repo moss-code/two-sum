@@ -67,7 +67,7 @@ export default {
           "/api/data": "获取历史数据（支持 ?hours=24 参数）",
           "/api/latest": "获取最新数据",
           "/api/stats": "获取统计信息",
-          "/api/collect": "手动触发数据采集"
+          "/api/aggregated": "获取按粒度聚合的数据（支持 ?granularity=fivemin|halfhour|hour|day|month 参数）",
         }
       }, corsHeaders);
 
