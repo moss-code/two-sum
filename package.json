@@ -25,10 +25,9 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "ws": "^8.16.0",
-    "playwright": "^1.59.1"
+    "ws": "^8.16.0"
   },
   "devDependencies": {
-    "wrangler": "^3.0.0"
+    "wrangler": "^4.0.0"
   }
 }

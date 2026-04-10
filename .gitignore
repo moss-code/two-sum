@@ -6,6 +6,8 @@ node_modules/
 .DS_Store
 dist/
 .cache/
+*.ps1
+CLAUDE.md
 
 # Wrangler local state
 .mf/

@@ -5,10 +5,10 @@
 ## 📋 目录
 
 - [环境准备](#环境准备)
+- [技术架构说明](#技术架构说明)
 - [本地开发](#本地开发)
 - [测试验证](#测试验证)
 - [生产部署](#生产部署)
-- [自动采集设置](#自动采集设置)
 - [监控运维](#监控运维)
 - [故障排查](#故障排查)
 - [API 文档](#api-文档)
@@ -37,8 +37,48 @@ npm --version
 ### 3. 安装项目依赖
 
 ```bash
-cd /Users/lhp/Project/two-sum
+cd /path/to/two-sum
 npm install
+```
+
+---
+
+## 技术架构说明
+
+### 数据采集架构
+
+本系统采用 **Cloudflare Worker Cron** 直接采集数据：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Cloudflare Worker                        │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
+│  │   Cron Job   │──│  collector   │──│  D1 Database │       │
+│  │  (每分钟)     │  │   模块       │  │              │       │
+│  └──────────────┘  └──────┬───────┘  └──────────────┘       │
+│                           │                                 │
+│           ┌───────────────┼───────────────┐                 │
+│           ▼               ▼               ▼                 │
+│    ┌────────────┐  ┌────────────┐  ┌────────────┐          │
+│    │  CN 区     │  │  ja3 代理   │  │   US 区    │          │
+│    │ 直接连接    │  │  服务      │  │ 通过代理    │          │
+│    └────────────┘  └────────────┘  └────────────┘          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**说明：**
+- **CN 区**：Worker 直接通过 WebSocket 连接 `wss://collaboration-ws.leetcode.cn`
+- **US 区**：Worker 通过 ja3 代理服务连接，绕过 TLS 指纹检测
+- **定时任务**：Worker Cron 每分钟触发一次，自动采集并存储到 D1 数据库
+
+### ja3 代理服务
+
+LeetCode 国际站（US）有反爬虫机制，会检测 TLS 指纹。需要使用 [ja3-proxy-python](https://github.com/moss-code/ja3-proxy-python/tree/main) 代理服务来绕过检测。
+
+**工作原理：**
+```
+Worker ──HTTP──▶ ja3-proxy ──WebSocket──▶ LeetCode US
+       (带TLS)      (模拟浏览器指纹)
 ```
 
 ---
@@ -82,12 +122,36 @@ npm run db:init
 
 **验证表创建成功：**
 ```bash
-npx wrangler d1 execute two-sum-db --local --command "SELECT name FROM sqlite_master WHERE type='table'"
+npx wrangler d1 execute two-sum-db --local --command "SELECT name FROM sqlite_master WHERE type='tables'"
 ```
 
 应该看到 `records` 表。
 
-### Step 4: 启动 Worker 开发服务器
+### Step 4: 配置 ja3 代理（可选，仅测试 US 区时需要）
+
+如果你在本地开发时需要测试 US 区数据采集，需要配置 ja3 代理：
+
+**方式 1：使用已部署的代理**
+
+在 `wrangler.toml` 中添加：
+
+```toml
+[vars]
+PROXY_URL = "https://your-ja3-proxy.onrender.com"
+PROXY_API_KEY = "your-proxy-api-key"
+```
+
+**方式 2：本地启动代理**
+
+参考 [ja3-proxy-python](https://github.com/moss-code/ja3-proxy-python/tree/main) 项目在本地启动代理服务，然后配置：
+
+```toml
+[vars]
+PROXY_URL = "http://localhost:8080"
+PROXY_API_KEY = "proxy_secret-key-2024"
+```
+
+### Step 5: 启动 Worker 开发服务器
 
 在一个终端窗口运行：
 
@@ -105,7 +169,7 @@ npm run dev
 
 保持此终端运行。
 
-### Step 5: 启动前端页面
+### Step 6: 启动前端页面
 
 在另一个新终端运行：
 
@@ -117,28 +181,18 @@ npm run pages:dev
 
 > **注意**：前端会自动使用 `http://localhost:8787` 作为 API 地址（在 localhost 环境下）。
 
-### Step 6: 测试数据采集
+### Step 7: 测试数据采集
 
-在第三个新终端运行：
+Worker 会在 Cron 触发时自动采集数据。在本地开发环境，你可以：
+
+1. **等待 Cron 触发**（如果配置了每分钟触发）
+2. **手动触发**（通过代码调用）
+
+查看采集日志：
 
 ```bash
-npm run collect
-```
-
-**预期输出：**
-```
-========== LeetCode 数据采集 ==========
-时间: 2026-02-10T15:30:00.000Z
-[US] 连接中...
-[CN] 连接中...
-[CN] 已连接
-[CN] 收到消息: 550
-[CN] ✅ 在线人数: 550
-
-准备推送数据: [ { region: 'CN', count: 550, timestamp: 1770737400000 } ]
-✅ 数据推送成功: { success: true, saved: 1, message: 'Successfully saved 1 records' }
-
-✅ 采集完成！
+# 在另一个终端运行
+npx wrangler tail
 ```
 
 **验证数据写入：**
@@ -162,8 +216,8 @@ curl http://localhost:8787/api/latest
 # 3. 获取历史数据（原始）
 curl "http://localhost:8787/api/data?hours=1"
 
-# 4. 按分钟聚合
-curl "http://localhost:8787/api/aggregated?granularity=minute&limit=20"
+# 4. 按 5 分钟聚合
+curl "http://localhost:8787/api/aggregated?granularity=fivemin&limit=20"
 
 # 5. 按半小时聚合
 curl "http://localhost:8787/api/aggregated?granularity=halfhour&limit=10"
@@ -185,24 +239,30 @@ curl http://localhost:8787/api/stats
 
 访问 `http://localhost:3000`，测试以下功能：
 
-- ✅ **粒度切换**：点击"按分钟"/"按半小时"/"按小时"/"按天"/"按月"按钮
+- ✅ **粒度切换**：点击"按 5 分钟"/"按半小时"/"按小时"/"按天"/"按月"按钮
 - ✅ **统计卡片**：查看最新的在线人数
 - ✅ **趋势图表**：查看数据趋势线
 - ✅ **交互缩放**：拖拽图表下方的滑块
 - ✅ **Tooltip**：鼠标悬停查看详细数据
 - ✅ **自动刷新**：等待 60 秒观察自动更新
 
-### 持续采集测试数据
+### 采集测试数据
 
-为了让图表更好看，可以连续采集一些数据：
+为了让图表更好看，可以连续触发几次采集：
 
 ```bash
-# 连续采集 20 次，间隔 3 秒
-for i in {1..20}; do
-  echo "=== 第 $i 次采集 ==="
-  npm run collect
-  sleep 3
-done
+# 在 wrangler tail 窗口查看日志的同时
+# 重启 Worker 会触发 Cron 立即执行
+```
+
+或者手动插入测试数据：
+
+```bash
+npx wrangler d1 execute two-sum-db --local --command "
+INSERT INTO records (region, count, timestamp) VALUES
+('CN', 500, $(($(date +%s) * 1000))),
+('US', 1200, $(($(date +%s) * 1000)))
+"
 ```
 
 ---
@@ -239,24 +299,50 @@ npm run db:init:remote
 npx wrangler d1 execute two-sum-db --remote --command "SELECT name FROM sqlite_master WHERE type='table'"
 ```
 
-### Step 4: 设置 API 密钥（生产环境）
+### Step 4: 部署 ja3 代理服务
 
-**方式 1: 使用 Secrets（推荐）**
+**使用 Render 部署（推荐，免费）**
+
+1. 访问 [render.com](https://render.com) 注册账号
+2. 创建新的 Web Service
+3. 连接 [ja3-proxy-python](https://github.com/moss-code/ja3-proxy-python/tree/main) 仓库
+4. 配置：
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `python app.py`
+   - **Instance Type**: Free
+5. 记下分配的 URL，如 `https://your-ja3-proxy.onrender.com`
+
+**部署完成后测试：**
+
 ```bash
-# 设置生产环境的 API 密钥
-npx wrangler secret put API_KEY
-# 输入密钥，例如：prod-secret-key-2024-abc123
+curl https://your-ja3-proxy.onrender.com/health
 ```
 
-**方式 2: 使用环境变量（仅本地）**
+应该返回 `{"status": "ok"}`。
 
-`wrangler.toml` 中已配置了本地开发用的 API_KEY：
-```toml
-[vars]
-API_KEY = "dev-secret-key-2024"
+### Step 5: 配置生产环境 Secrets
+
+设置 ja3 代理的配置：
+
+```bash
+# 设置代理 URL
+npx wrangler secret put PROXY_URL
+# 输入你的 ja3 代理地址，如：https://your-ja3-proxy.onrender.com
+
+# 设置代理 API 密钥
+npx wrangler secret put PROXY_API_KEY
+# 输入你的代理 API 密钥
 ```
 
-### Step 5: 部署 Worker
+**验证 Secrets：**
+
+```bash
+npx wrangler secret list
+```
+
+应该看到 `PROXY_URL` 和 `PROXY_API_KEY`。
+
+### Step 6: 部署 Worker
 
 ```bash
 npm run deploy
@@ -271,7 +357,7 @@ npm run deploy
 
 **重要**：记下这个 URL！
 
-### Step 6: 测试生产 Worker
+### Step 7: 测试生产 Worker
 
 ```bash
 # 替换为你的实际 URL
@@ -283,35 +369,18 @@ curl $WORKER_URL/api/latest
 curl "$WORKER_URL/api/stats"
 ```
 
-### Step 7: 配置采集脚本
+### Step 8: 验证数据采集
 
-创建 `.env` 文件：
+等待 1-2 分钟后，检查数据是否写入：
 
-```bash
-cp .env.example .env
-```
-
-编辑 `.env`：
-
-```env
-# Worker API 地址（替换为实际 URL）
-WORKER_API=https://two-sum.YOUR-SUBDOMAIN.workers.dev/api/push
-
-# API 密钥（与 Worker Secrets 中设置的一致）
-API_KEY=secret-020214xafs921w
-```
-
-### Step 8: 测试生产环境采集
-
-```bash
-npm run collect
-```
-
-应该能看到数据成功推送到生产环境。
-
-**验证：**
 ```bash
 npx wrangler d1 execute two-sum-db --remote --command "SELECT * FROM records ORDER BY timestamp DESC LIMIT 5"
+```
+
+查看 Worker 日志确认采集情况：
+
+```bash
+npx wrangler tail
 ```
 
 ### Step 9: 部署前端
@@ -358,171 +427,6 @@ npm run pages:deploy
 
 ---
 
-## 自动采集设置
-
-数据采集需要每分钟运行一次 `collector.js`。以下是多种自动化方案：
-
-### 方案 1: GitHub Actions（推荐，免费且可靠）
-
-创建 `.github/workflows/collect.yml`：
-
-```yaml
-name: LeetCode Data Collector
-
-on:
-  schedule:
-    # 每分钟运行一次
-    - cron: '* * * * *'
-  workflow_dispatch:  # 支持手动触发
-
-jobs:
-  collect:
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run collector
-        run: node collector.js
-        env:
-          WORKER_API: ${{ secrets.WORKER_API }}
-          API_KEY: ${{ secrets.API_KEY }}
-```
-
-**设置 GitHub Secrets：**
-
-1. 访问你的 GitHub 仓库
-2. Settings → Secrets and variables → Actions
-3. 添加以下 secrets：
-   - `WORKER_API`: `https://two-sum.YOUR-SUBDOMAIN.workers.dev/api/push`
-   - `API_KEY`: `prod-secret-key-2024-abc123`
-
-**优点：**
-- ✅ 完全免费
-- ✅ 自动运行，无需服务器
-- ✅ 有日志记录
-- ✅ 可查看运行历史
-
-**缺点：**
-- ⚠️ 最小间隔是 5 分钟（GitHub Actions 限制）
-
-**注意**：GitHub Actions 的 cron 最短间隔是 5 分钟，不是 1 分钟。如果需要每分钟采集，使用下面的其他方案。
-
-### 方案 2: cron（Linux/macOS 服务器）
-
-适合有自己的服务器或 VPS。
-
-```bash
-# 编辑 crontab
-crontab -e
-
-# 添加以下行（每分钟运行）
-* * * * * cd /path/to/two-sum && /usr/local/bin/node collector.js >> /var/log/leetcode-collector.log 2>&1
-```
-
-**查看日志：**
-```bash
-tail -f /var/log/leetcode-collector.log
-```
-
-**优点：**
-- ✅ 精确到每分钟
-- ✅ 简单可靠
-- ✅ 完全控制
-
-**缺点：**
-- ❌ 需要一台持续运行的服务器
-
-### 方案 3: PM2（推荐用于服务器）
-
-PM2 是一个强大的 Node.js 进程管理器。
-
-```bash
-# 安装 PM2
-npm install -g pm2
-
-# 启动采集器（每分钟运行）
-pm2 start collector.js --cron "* * * * *" --no-autorestart --name leetcode-collector
-
-# 查看日志
-pm2 logs leetcode-collector
-
-# 查看状态
-pm2 status
-
-# 设置开机自启
-pm2 startup
-pm2 save
-
-# 停止采集
-pm2 stop leetcode-collector
-
-# 删除任务
-pm2 delete leetcode-collector
-```
-
-**优点：**
-- ✅ 精确到每分钟
-- ✅ 自动重启
-- ✅ 日志管理
-- ✅ 监控面板
-
-**缺点：**
-- ❌ 需要服务器
-
-### 方案 4: Cloudflare Workers Cron（已废弃）
-
-**注意**：原计划使用 Worker Cron，但由于 Workers 不支持作为 WebSocket 客户端，已改用外部采集脚本。
-
-`wrangler.toml` 中的 cron 配置已保留但不再使用：
-
-```toml
-[triggers]
-crons = ["* * * * *"]  # 已废弃，不执行采集
-```
-
-### 方案 5: watch 命令（临时测试）
-
-适合短期测试，不推荐生产使用。
-
-```bash
-# 安装 watch (macOS)
-brew install watch
-
-# 每 60 秒运行一次
-watch -n 60 'cd /path/to/two-sum && node collector.js'
-```
-
-**优点：**
-- ✅ 简单快速
-- ✅ 适合测试
-
-**缺点：**
-- ❌ 终端必须保持打开
-- ❌ 不适合生产环境
-
-### 推荐方案总结
-
-| 场景 | 推荐方案 | 间隔精度 |
-|------|----------|----------|
-| **无服务器** | GitHub Actions | 5 分钟 |
-| **有服务器** | PM2 | 1 分钟 |
-| **简单 VPS** | cron | 1 分钟 |
-| **本地测试** | watch | 自定义 |
-
----
-
 ## 监控运维
 
 ### 查看数据库统计
@@ -561,17 +465,18 @@ npx wrangler tail
 ```
 
 你会看到：
-- API 请求日志
-- 数据采集推送日志
+- Cron 任务触发日志
+- 数据采集结果（US 和 CN 区的在线人数）
+- 数据写入日志
 - 错误信息（如果有）
 
 ### 数据清理
 
-**删除 7 天前的数据：**
+**删除 90 天前的数据：**
 ```bash
 npx wrangler d1 execute two-sum-db --remote --command "
 DELETE FROM records
-WHERE timestamp < (strftime('%s', 'now', '-7 days') * 1000)
+WHERE timestamp < (strftime('%s', 'now', '-90 days') * 1000)
 "
 ```
 
@@ -605,14 +510,6 @@ cat backup-*.json | jq '.[0].results | length'
    - Storage & Databases → D1 → two-sum-db → Metrics
    - 查看查询次数、行数读取
 
-### 设置告警（可选）
-
-使用 Cloudflare Notifications 或第三方服务（如 Better Stack）设置告警：
-
-- Worker 错误率 > 5%
-- D1 查询失败
-- API 响应时间 > 1s
-
 ---
 
 ## 故障排查
@@ -642,37 +539,43 @@ SELECT name FROM sqlite_master WHERE type='table'
 [US] ❌ 错误: Unexpected server response: 403
 ```
 
-**原因：** LeetCode 国际站有反爬虫机制。
+**原因：** LeetCode 国际站有 TLS 指纹检测机制。
 
 **解决方案：**
 
-**方案 A: 专注 CN 区（推荐）**
+1. **检查 ja3 代理服务状态：**
+   ```bash
+   curl https://your-ja3-proxy.onrender.com/health
+   ```
 
-目前 CN 区采集稳定，可以先专注于 CN 区数据。前端会自动处理 US 区为 null 的情况。
+2. **检查 Secrets 配置：**
+   ```bash
+   npx wrangler secret list
+   
+   # 重新设置
+   npx wrangler secret put PROXY_URL
+   npx wrangler secret put PROXY_API_KEY
+   ```
 
-**方案 B: 使用代理**
+3. **重新部署 Worker：**
+   ```bash
+   npm run deploy
+   ```
 
-修改 `collector.js`，通过代理访问：
+### 问题 3: CN 区连接失败
 
-```javascript
-// 需要安装：npm install https-proxy-agent
-const { HttpsProxyAgent } = require('https-proxy-agent');
-
-const ws = new WebSocket(url, {
-  headers: headers,
-  agent: new HttpsProxyAgent('http://your-proxy:port')
-});
+**错误信息：**
+```
+[CN] ❌ 错误: WebSocket 连接失败
 ```
 
-**方案 C: 降低频率**
+CN 区通常连接稳定。如果失败：
 
-仅采集 CN 区，或者 US 区改为每 5 分钟采集一次。
+1. 检查网络连接
+2. 查看 Worker 日志确认重试情况
+3. Worker 会自动重试 3 次
 
-**方案 D: 添加更多请求头**
-
-在 `collector.js` 中尝试添加 Cookie、Referer 等（需要手动从浏览器复制）。
-
-### 问题 3: 前端无法加载数据
+### 问题 4: 前端无法加载数据
 
 **检查清单：**
 
@@ -704,68 +607,40 @@ const ws = new WebSocket(url, {
    "
    ```
 
-   如果为 0，说明还没有采集数据。
+   如果为 0，说明 Cron 还未触发或采集失败。查看日志：
+   ```bash
+   npx wrangler tail
+   ```
 
-### 问题 4: 采集脚本推送失败 401
+### 问题 5: 定时任务没有执行
 
-**错误信息：**
+**检查 Cron 配置：**
+
+```bash
+npx wrangler trigger list
 ```
-❌ 推送失败: HTTP 401: Unauthorized
+
+应该看到 `* * * * *`（每分钟）。
+
+**查看日志：**
+
+```bash
+npx wrangler tail
 ```
 
-**原因：** API Key 不匹配。
+观察是否有 Cron 触发日志：
+```
+Cron triggered at: 2026-04-10T12:34:56.789Z
+```
+
+### 问题 6: ja3 代理服务返回 500 错误
 
 **解决方案：**
 
-1. **检查 Worker Secrets：**
-   ```bash
-   # 重新设置密钥
-   npx wrangler secret put API_KEY
-   ```
-
-2. **检查 .env 文件：**
-   ```env
-   API_KEY=prod-secret-key-2024-abc123  # 必须与 Worker Secret 一致
-   ```
-
-3. **重新部署 Worker：**
-   ```bash
-   npm run deploy
-   ```
-
-### 问题 5: GitHub Actions 无法运行
-
-**原因：** GitHub Actions 的 cron 最短间隔是 **5 分钟**，不是 1 分钟。
-
-**解决方案：**
-
-修改 `.github/workflows/collect.yml` 中的 cron 表达式：
-
-```yaml
-schedule:
-  # 每 5 分钟运行一次
-  - cron: '*/5 * * * *'
-```
-
-或者使用其他方案（cron/PM2）实现每分钟采集。
-
-### 问题 6: 前端粒度切换无响应
-
-**检查：**
-
-1. **浏览器控制台是否有错误**
-
-   打开开发者工具 → Console，查看错误信息。
-
-2. **API 端点是否正常**
-
-   ```bash
-   curl "https://two-sum.YOUR-SUBDOMAIN.workers.dev/api/aggregated?granularity=minute&limit=10"
-   ```
-
-3. **数据是否足够**
-
-   某些粒度需要足够的数据才能显示（如按天、按月）。
+1. 检查代理服务是否正常运行
+2. 检查代理服务的日志
+3. 确保代理服务的 API 密钥正确
+4. 重启代理服务
 
 ---
 
@@ -850,18 +725,18 @@ curl "http://localhost:8787/api/data?hours=6"
 按时间粒度聚合数据（核心 API）。
 
 **查询参数：**
-- `granularity` (必需)：时间粒度
-  - `minute` - 按分钟
+- `granularity` (可选)：时间粒度，可选值：
+  - `fivemin` - 按 5 分钟
   - `halfhour` - 按半小时
-  - `hour` - 按小时
+  - `hour`（默认）- 按小时
   - `day` - 按天
   - `month` - 按月
-- `limit` (可选)：返回的数据点数量
+- `limit` (可选)：返回的数据点数量，默认 168
 
 **请求示例：**
 ```bash
-# 按分钟（最近 180 分钟）
-curl "http://localhost:8787/api/aggregated?granularity=minute&limit=180"
+# 按 5 分钟（最近 24 小时）
+curl "http://localhost:8787/api/aggregated?granularity=fivemin&limit=288"
 
 # 按半小时（最近 7 天）
 curl "http://localhost:8787/api/aggregated?granularity=halfhour&limit=336"
@@ -881,7 +756,7 @@ curl "http://localhost:8787/api/aggregated?granularity=month&limit=24"
 [
   {
     "region": "CN",
-    "time": "2026-02-10 15:30",
+    "time": "2026-02-10 15:00",
     "avg_count": 547.82,
     "min_count": 546,
     "max_count": 550,
@@ -924,41 +799,6 @@ curl "http://localhost:8787/api/aggregated?granularity=month&limit=24"
 }
 ```
 
-### POST /api/push
-
-接收采集器推送的数据（需要 API Key 验证）。
-
-**请求头：**
-- `Content-Type`: `application/json`
-- `X-API-Key`: API 密钥
-
-**请求体：**
-```json
-{
-  "records": [
-    {
-      "region": "US",
-      "count": 1234,
-      "timestamp": 1707580800000
-    },
-    {
-      "region": "CN",
-      "count": 567,
-      "timestamp": 1707580800000
-    }
-  ]
-}
-```
-
-**响应示例：**
-```json
-{
-  "success": true,
-  "saved": 2,
-  "message": "Successfully saved 2 records"
-}
-```
-
 ---
 
 ## 性能优化建议
@@ -973,7 +813,7 @@ curl "http://localhost:8787/api/aggregated?granularity=month&limit=24"
 ### 2. 限制数据点数量
 
 前端已自动设置合理的 limit：
-- 按分钟：180 点（3 小时）
+- 按 5 分钟：288 点（24 小时）
 - 按半小时：336 点（7 天）
 - 按小时：168 点（7 天）
 - 按天：90 点（90 天）
@@ -989,7 +829,7 @@ CREATE INDEX idx_timestamp ON records(timestamp DESC);
 
 ### 4. 定期清理历史数据
 
-建议保留最近 30-90 天的数据，定期清理旧数据：
+建议保留最近 90 天的数据，定期清理旧数据：
 
 ```bash
 # 每周运行一次（保留 90 天）
@@ -1003,58 +843,50 @@ WHERE timestamp < (strftime('%s', 'now', '-90 days') * 1000)
 
 ## 常见问题 FAQ
 
-### Q1: 为什么 Worker 不能直接采集数据？
+### Q1: 为什么需要 ja3 代理？
 
-A: Cloudflare Workers **不支持作为 WebSocket 客户端**连接外部服务器。因此需要使用独立的 Node.js 脚本（`collector.js`）进行采集，然后通过 HTTP API 推送到 Worker。
+A: LeetCode 国际站（US）有 TLS 指纹检测机制，会阻止来自 Cloudflare Workers 的直接连接。通过 [ja3-proxy-python](https://github.com/moss-code/ja3-proxy-python/tree/main) 代理服务可以模拟浏览器指纹，绕过检测。
+
+中国区（CN）没有这种限制，Worker 可以直接连接。
 
 ### Q2: 免费额度够用吗？
 
 A: 完全够用！Cloudflare 免费额度：
 
-- **Workers**: 100,000 请求/天
+- **Workers**: 100,000 请求/天 + Cron 触发
 - **D1**: 100,000 行读取/天，1 GB 存储
 - **Pages**: 无限请求
 
 按每分钟采集 2 次（US + CN），每天约 2,880 次写入，远低于限制。
 
-### Q3: 如何添加更多题目监控？
+### Q3: 如何部署自己的 ja3 代理？
 
-A: 修改 `collector.js`：
+A: 参考 [ja3-proxy-python](https://github.com/moss-code/ja3-proxy-python/tree/main) 项目：
 
-```javascript
-const CONFIG = {
-  WS_URLS: {
-    US_TWO_SUM: 'wss://collaboration-ws.leetcode.com/problems/two-sum',
-    US_THREE_SUM: 'wss://collaboration-ws.leetcode.com/problems/3sum',
-    CN_TWO_SUM: 'wss://collaboration-ws.leetcode.cn/problems/two-sum',
-    // 添加更多...
-  }
-};
-```
-
-然后修改数据库表结构，添加 `problem` 字段。
+1. 克隆仓库
+2. 部署到 Render、Heroku 或自己的服务器
+3. 配置 `PROXY_URL` 和 `PROXY_API_KEY`
 
 ### Q4: 数据会丢失吗？
 
 A: Cloudflare D1 是持久化存储，数据不会丢失。建议定期备份（导出 JSON）。
 
-### Q5: 如何更换 API 密钥？
+### Q5: 如何更换 ja3 代理地址？
 
 A:
 
 ```bash
 # 1. 更新 Worker Secret
-npx wrangler secret put API_KEY
-# 输入新密钥
+npx wrangler secret put PROXY_URL
+# 输入新的代理地址
 
-# 2. 更新 .env 文件
-echo "API_KEY=new-secret-key" > .env
-
-# 3. 重新部署 Worker
+# 2. 重新部署 Worker
 npm run deploy
-
-# 4. 重启采集脚本
 ```
+
+### Q6: 可以只监控 CN 区吗？
+
+A: 可以。如果不配置 `PROXY_URL`，US 区采集会失败，但 CN 区仍会正常工作。前端会显示 US 区为 "暂无"。
 
 ---
 
@@ -1063,16 +895,16 @@ npm run deploy
 ### ✅ 已完成
 - [x] Worker API 部署
 - [x] D1 数据库创建
-- [x] 数据采集脚本
+- [x] Worker 直接采集数据（Cron）
+- [x] CN 区直接 WebSocket 采集
+- [x] US 区通过 ja3 代理采集
 - [x] 前端可视化（5 种粒度）
-- [x] CN 区数据采集成功
-- [x] 解决 US 区 403 问题
 
 ### 🔄 待优化
-- [ ] 设置自动采集（GitHub Actions/cron）
 - [ ] 绑定自定义域名
 - [ ] 添加数据导出功能
 - [ ] 添加更多题目监控
+- [ ] 设置告警通知
 
 ---
 
@@ -1081,6 +913,7 @@ npm run deploy
 - **GitHub Issues**: 报告 bug 或提出建议
 - **文档**: README.md 查看项目概览
 - **Cloudflare Docs**: https://developers.cloudflare.com
+- **ja3-proxy**: https://github.com/moss-code/ja3-proxy-python
 
 ---
 

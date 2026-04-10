@@ -6,7 +6,7 @@
 
 - ⏱️ **实时采集**：每分钟自动采集一次数据
 - 📊 **双 Y 轴图表**：完美展示不同数量级的数据对比
-- 🔍 **多时间范围**：支持 1 小时到 7 天的历史数据查询
+- 🔍 **多时间范围**：支持 5分钟、半小时、小时、天、月多种粒度
 - 🎨 **精美可视化**：基于 ECharts 的交互式图表
 - 💰 **零成本部署**：完全基于 Cloudflare 免费套餐
 - ⚡ **高性能**：全球 CDN 加速，毫秒级响应
@@ -17,13 +17,17 @@
 - **数据库**：Cloudflare D1（SQLite）
 - **前端**：纯静态页面（ECharts）
 - **部署**：Cloudflare Pages
+- **数据采集**：
+  - CN 区：直接 WebSocket 连接
+  - US 区：通过 [ja3-proxy-python](https://github.com/moss-code/ja3-proxy-python/tree/main) 代理服务绕过 TLS 指纹检测
 
 ## 📦 项目结构
 
 ```
 two-sum/
 ├── src/
-│   └── index.js           # Worker 主逻辑（Cron + API）
+│   ├── index.js           # Worker 主逻辑（Cron + API）
+│   └── collector.js       # 数据采集模块（WebSocket + 代理）
 ├── public/
 │   └── index.html         # 前端页面
 ├── schema.sql             # 数据库表结构
@@ -39,6 +43,7 @@ two-sum/
 - Node.js 16+
 - npm 或 yarn
 - Cloudflare 账号（免费）
+- ja3 代理服务（用于采集 US 区数据，可自行部署）
 
 ### 1. 安装依赖
 
@@ -73,7 +78,38 @@ npm run db:init
 npm run db:init:remote
 ```
 
-### 4. 本地开发调试
+### 4. 配置 ja3 代理（用于 US 区数据采集）
+
+US 区的 LeetCode WebSocket 有 TLS 指纹检测机制，需要通过 ja3 代理服务访问。
+
+**选项 A：自行部署 ja3 代理**
+
+使用 [ja3-proxy-python](https://github.com/moss-code/ja3-proxy-python/tree/main) 项目部署：
+
+```bash
+# 克隆项目
+git clone https://github.com/moss-code/ja3-proxy-python.git
+cd ja3-proxy-python
+
+# 部署到 Render（免费）
+# 或者使用 Docker 部署到自己的服务器
+```
+
+**选项 B：使用已有的代理服务**
+
+如果你已经有可用的 ja3 代理服务，记录其地址和 API 密钥。
+
+**配置代理地址：**
+
+编辑 `wrangler.toml`，添加代理配置：
+
+```toml
+[vars]
+PROXY_URL = "https://your-ja3-proxy.onrender.com"  # 你的 ja3 代理地址
+PROXY_API_KEY = "your-proxy-api-key"               # 代理 API 密钥
+```
+
+### 5. 本地开发调试
 
 启动 Worker 开发服务器：
 
@@ -86,9 +122,9 @@ npm run dev
 - `http://localhost:8787/api/data?hours=24` - 获取历史数据
 - `http://localhost:8787/api/latest` - 获取最新数据
 - `http://localhost:8787/api/stats` - 获取统计信息
-- `http://localhost:8787/api/collect` - 手动触发采集
+- `http://localhost:8787/api/aggregated?granularity=hour` - 获取聚合数据
 
-### 5. 测试前端页面
+### 6. 测试前端页面
 
 在另一个终端启动前端服务器：
 
@@ -104,14 +140,16 @@ npm run pages:dev
 const API_URL = 'http://localhost:8787';  // 本地开发时使用
 ```
 
-### 6. 手动测试数据采集
+### 7. 验证数据采集
 
-在浏览器访问：
-```
-http://localhost:8787/api/collect
+Worker 会自动通过 Cron 任务采集数据。在本地开发时，可以手动触发采集：
+
+```bash
+# 查看实时日志
+npx wrangler tail
 ```
 
-然后查询数据库验证：
+然后查询数据库验证数据是否写入：
 
 ```bash
 npx wrangler d1 execute two-sum-db --local --command "SELECT * FROM records ORDER BY timestamp DESC LIMIT 10"
@@ -136,63 +174,82 @@ npm run deploy
 https://two-sum.your-subdomain.workers.dev
 ```
 
+**重要**：记下这个 URL！
+
 ### 3. 初始化生产数据库
 
 ```bash
 npm run db:init:remote
 ```
 
-### 4. 测试定时任务
+### 4. 配置生产环境变量
 
-由于 Cron 是每分钟执行，等待 1-2 分钟后查询数据库：
+设置 ja3 代理的配置（生产环境）：
+
+```bash
+# 设置代理 URL
+npx wrangler secret put PROXY_URL
+# 输入你的 ja3 代理地址，如：https://your-ja3-proxy.onrender.com
+
+# 设置代理 API 密钥
+npx wrangler secret put PROXY_API_KEY
+# 输入你的代理 API 密钥
+```
+
+### 5. 测试数据采集
+
+Cron 任务会每分钟自动执行。等待 1-2 分钟后查询数据库：
 
 ```bash
 npx wrangler d1 execute two-sum-db --remote --command "SELECT COUNT(*) as count FROM records"
 ```
 
-或者手动触发采集：
+或者查看实时日志：
 ```bash
-curl https://two-sum.your-subdomain.workers.dev/api/collect
+npx wrangler tail
 ```
 
-### 5. 部署前端页面
+### 6. 部署前端页面
 
-**方式一：通过 CLI 部署**
+**更新 API URL**
 
-修改 `public/index.html` 中的 API_URL：
+编辑 `public/index.html`，找到这一行：
+
 ```javascript
-const API_URL = 'https://two-sum.your-subdomain.workers.dev';
+const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? 'http://localhost:8787'
+    : 'https://two-sum.YOUR-SUBDOMAIN.workers.dev';  // 替换为实际 URL
 ```
 
-然后部署：
+将 `YOUR-SUBDOMAIN` 替换为你的实际子域名。
+
+**部署到 Pages**
+
 ```bash
 npm run pages:deploy
 ```
 
-**方式二：通过 GitHub 自动部署（推荐）**
+**预期输出：**
+```
+✨ Success! Deployed to https://two-sum-web.pages.dev
+```
 
-1. 将代码推送到 GitHub
-2. 登录 Cloudflare Dashboard → Pages
-3. 点击 "Create a project" → "Connect to Git"
-4. 选择你的仓库
-5. 配置构建设置：
-   - **Build command**: (留空)
-   - **Build output directory**: `public`
-6. 点击 "Save and Deploy"
+访问这个 URL，你应该能看到完整的可视化页面！
 
-部署完成后，你会得到一个 `.pages.dev` 域名。
+### 7. 绑定自定义域名（可选）
 
-### 6. 绑定自定义域名（可选）
+#### Worker 自定义域名
 
-在 Cloudflare Dashboard 中：
+1. 访问 [Cloudflare Dashboard](https://dash.cloudflare.com)
+2. Workers & Pages → two-sum → Settings → Triggers
+3. Custom Domains → Add Custom Domain
+4. 输入你的域名（如 `api.example.com`）
 
-1. **Worker 绑定自定义域名**：
-   - Workers & Pages → two-sum → Settings → Triggers
-   - 添加自定义域名（需要域名托管在 Cloudflare）
+#### Pages 自定义域名
 
-2. **Pages 绑定自定义域名**：
-   - Pages → two-sum-web → Custom domains
-   - 添加你的域名
+1. Pages → two-sum-web → Custom domains
+2. Set up a custom domain
+3. 输入你的域名（如 `leetcode.example.com`）
 
 ## 🔧 运维管理
 
@@ -225,11 +282,11 @@ GROUP BY region
 
 ### 清理历史数据
 
-保留最近 7 天的数据：
+保留最近 90 天的数据：
 ```bash
 npx wrangler d1 execute two-sum-db --remote --command "
 DELETE FROM records
-WHERE timestamp < strftime('%s', 'now', '-7 days') * 1000
+WHERE timestamp < (strftime('%s', 'now', '-90 days') * 1000)
 "
 ```
 
@@ -262,15 +319,33 @@ npm run deploy
 
 ## 🐛 常见问题
 
-### 1. WebSocket 连接失败？
+### 1. US 区 WebSocket 403 错误
 
-LeetCode 的 WebSocket 协议可能需要调整。建议：
+**错误信息：**
+```
+[US] ❌ 错误: Unexpected server response: 403
+```
 
-1. 在浏览器开发者工具中观察真实的 WebSocket 消息格式
-2. 修改 `src/index.js` 中的 `getOnlineCount()` 函数
-3. 调整消息解析逻辑
+**原因：** LeetCode 国际站有 TLS 指纹检测机制。
 
-### 2. 数据库写入失败？
+**解决方案：**
+
+确保 ja3 代理服务正常运行，且 `PROXY_URL` 和 `PROXY_API_KEY` 配置正确：
+
+```bash
+# 检查 secrets 是否设置正确
+npx wrangler secret list
+
+# 重新设置
+npx wrangler secret put PROXY_URL
+npx wrangler secret put PROXY_API_KEY
+```
+
+### 2. CN 区连接失败
+
+CN 区通常连接稳定，如果失败可能是网络问题。Worker 会自动重试 3 次。
+
+### 3. 数据库写入失败
 
 检查 `wrangler.toml` 中的 `database_id` 是否正确：
 
@@ -278,21 +353,21 @@ LeetCode 的 WebSocket 协议可能需要调整。建议：
 npx wrangler d1 list
 ```
 
-### 3. 前端无法获取数据？
+### 4. 前端无法获取数据
 
 检查 CORS 配置和 API URL：
 
 1. 确保 `public/index.html` 中的 `API_URL` 指向正确的 Worker 地址
 2. 在浏览器控制台查看网络请求错误
 
-### 4. 定时任务没有执行？
+### 5. 定时任务没有执行
 
 ```bash
 # 查看实时日志
 npx wrangler tail
 
-# 手动触发测试
-curl https://your-worker.workers.dev/api/collect
+# 检查 Cron 配置
+npx wrangler trigger list
 ```
 
 ## 📊 API 文档
@@ -316,6 +391,28 @@ curl https://your-worker.workers.dev/api/collect
     "region": "CN",
     "count": 567,
     "timestamp": 1707580800000
+  }
+]
+```
+
+### GET /api/aggregated
+
+按时间粒度聚合数据。
+
+**查询参数：**
+- `granularity` (可选)：时间粒度，可选值：`fivemin`、`halfhour`、`hour`（默认）、`day`、`month`
+- `limit` (可选)：返回的数据点数量，默认 168
+
+**响应示例：**
+```json
+[
+  {
+    "region": "CN",
+    "time": "2026-02-10 15:00",
+    "avg_count": 547.82,
+    "min_count": 546,
+    "max_count": 550,
+    "sample_count": 11
   }
 ]
 ```
