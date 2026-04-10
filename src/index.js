@@ -118,8 +118,8 @@ async function handleAggregatedAPI(env, url, corsHeaders) {
   const granularity = url.searchParams.get('granularity') || 'hour'; // fivemin, halfhour, hour, day, month
   const limit = parseInt(url.searchParams.get('limit')) || 168; // 默认限制
 
-  if (limit <= 0 || limit > 288) {
-    return jsonResponse({ error: 'Invalid limit. Use a value between 1 and 288' }, corsHeaders, 400);
+  if (limit <= 0 || limit > 336) {
+    return jsonResponse({ error: 'Invalid limit. Use a value between 1 and 336' }, corsHeaders, 400);
   }
 
   let timeFormat, groupBy;
