@@ -15,5 +15,5 @@ database_id = "36ece8dc-52e2-4abd-87be-8eccfd5b6b49"  # 替换为实际的 datab
 # Cron 表达式：分 时 日 月 周
 # "* * * * *" 表示每分钟
 [triggers]
-crons = ["* * * * *"]
+crons = ["*/2 * * * *"]
 
