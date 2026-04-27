@@ -5,7 +5,6 @@
  * 2. 提供 API 给前端查询历史数据（Fetch）
  */
 import getOnlineCount from "./collector";
-// import getOnlineCount from "./t";
 
 export default {
   /**
@@ -51,14 +50,6 @@ export default {
         return await handlePushAPI(request, env, corsHeaders);
       }
 
-      // 手动触发采集（已废弃，Worker 不支持 WebSocket 客户端）
-      if (url.pathname === "/api/collect") {
-        return jsonResponse({
-          error: "Deprecated",
-          message: "请使用独立的采集脚本：node collector.js"
-        }, corsHeaders, 410);
-      }
-
       // 默认响应
       return jsonResponse({
         name: "LeetCode Two-Sum Monitor API",
@@ -81,7 +72,7 @@ export default {
   },
 
   /**
-   * 定时任务处理器（已废弃）
+   * 定时任务处理器
    * 注意：由于 Workers 不支持 WebSocket 客户端，定时任务已移至外部采集脚本
    */
   async scheduled(event, env, ctx) {
@@ -116,9 +107,9 @@ async function handleDataAPI(env, url, corsHeaders) {
  */
 async function handleAggregatedAPI(env, url, corsHeaders) {
   const granularity = url.searchParams.get('granularity') || 'hour'; // fivemin, halfhour, hour, day, month
-  const limit = parseInt(url.searchParams.get('limit')) || 168; // 默认限制
+  const limit = parseInt(url.searchParams.get("limit")) || 336; // 默认限制
 
-  if (limit <= 0 || limit > 336) {
+  if (limit <= 0 || limit > 336 * 2) {
     return jsonResponse({ error: 'Invalid limit. Use a value between 1 and 336' }, corsHeaders, 400);
   }
 
@@ -126,47 +117,47 @@ async function handleAggregatedAPI(env, url, corsHeaders) {
 
   switch (granularity) {
     case 'fivemin':
-      // 按 5 分钟聚合：格式为 "YYYY-MM-DD HH:MM"（中国时区 UTC+8）
+      // 按 5 分钟聚合：格式为 "YYYY-MM-DD HH:MM"（UTC）
       // 将分钟数归类到 00, 05, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55
-      timeFormat = `strftime('%Y-%m-%d %H:', datetime(timestamp/1000, 'unixepoch', '+8 hours')) ||
+      timeFormat = `strftime('%Y-%m-%d %H:', datetime(timestamp/1000, 'unixepoch')) ||
                     CASE
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch', '+8 hours')) AS INTEGER) < 5 THEN '00'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch', '+8 hours')) AS INTEGER) < 10 THEN '05'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch', '+8 hours')) AS INTEGER) < 15 THEN '10'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch', '+8 hours')) AS INTEGER) < 20 THEN '15'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch', '+8 hours')) AS INTEGER) < 25 THEN '20'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch', '+8 hours')) AS INTEGER) < 30 THEN '25'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch', '+8 hours')) AS INTEGER) < 35 THEN '30'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch', '+8 hours')) AS INTEGER) < 40 THEN '35'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch', '+8 hours')) AS INTEGER) < 45 THEN '40'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch', '+8 hours')) AS INTEGER) < 50 THEN '45'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch', '+8 hours')) AS INTEGER) < 55 THEN '50'
+                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 5 THEN '00'
+                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 10 THEN '05'
+                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 15 THEN '10'
+                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 20 THEN '15'
+                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 25 THEN '20'
+                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 30 THEN '25'
+                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 35 THEN '30'
+                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 40 THEN '35'
+                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 45 THEN '40'
+                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 50 THEN '45'
+                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 55 THEN '50'
                       ELSE '55'
                     END`;
       groupBy = timeFormat;
       break;
     case 'halfhour':
-      // 按半小时聚合：格式为 "YYYY-MM-DD HH:00" 或 "YYYY-MM-DD HH:30"（中国时区）
-      timeFormat = `strftime('%Y-%m-%d %H:', datetime(timestamp/1000, 'unixepoch', '+8 hours')) ||
+      // 按半小时聚合：格式为 "YYYY-MM-DD HH:00" 或 "YYYY-MM-DD HH:30"（UTC）
+      timeFormat = `strftime('%Y-%m-%d %H:', datetime(timestamp/1000, 'unixepoch')) ||
                     CASE
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch', '+8 hours')) AS INTEGER) < 30 THEN '00'
+                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 30 THEN '00'
                       ELSE '30'
                     END`;
       groupBy = timeFormat;
       break;
     case 'hour':
-      // 按小时聚合：格式为 "YYYY-MM-DD HH:00"（中国时区）
-      timeFormat = "strftime('%Y-%m-%d %H:00', datetime(timestamp/1000, 'unixepoch', '+8 hours'))";
+      // 按小时聚合：格式为 "YYYY-MM-DD HH:00"（UTC）
+      timeFormat = "strftime('%Y-%m-%d %H:00', datetime(timestamp/1000, 'unixepoch'))";
       groupBy = timeFormat;
       break;
     case 'day':
-      // 按天聚合：格式为 "YYYY-MM-DD"（中国时区）
-      timeFormat = "strftime('%Y-%m-%d', datetime(timestamp/1000, 'unixepoch', '+8 hours'))";
+      // 按天聚合：格式为 "YYYY-MM-DD"（UTC）
+      timeFormat = "strftime('%Y-%m-%d', datetime(timestamp/1000, 'unixepoch'))";
       groupBy = timeFormat;
       break;
     case 'month':
-      // 按月聚合：格式为 "YYYY-MM"（中国时区）
-      timeFormat = "strftime('%Y-%m', datetime(timestamp/1000, 'unixepoch', '+8 hours'))";
+      // 按月聚合：格式为 "YYYY-MM"（UTC）
+      timeFormat = "strftime('%Y-%m', datetime(timestamp/1000, 'unixepoch'))";
       groupBy = timeFormat;
       break;
     default:

@@ -8,6 +8,7 @@ dist/
 .cache/
 *.ps1
 CLAUDE.md
+.workbuddy/
 
 # Wrangler local state
 .mf/

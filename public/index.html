@@ -105,6 +105,25 @@
             font-size: 0.9em;
         }
 
+        /* 时区下拉框 */
+        #tz-select {
+            padding: 10px 16px;
+            border: 2px solid #667eea;
+            background: white;
+            color: #667eea;
+            cursor: pointer;
+            border-radius: 8px;
+            font-size: 0.9em;
+            font-weight: 600;
+            outline: none;
+            transition: all 0.3s;
+        }
+
+        #tz-select:hover, #tz-select:focus {
+            border-color: #764ba2;
+            box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+        }
+
         button {
             padding: 10px 20px;
             border: 2px solid #667eea;
@@ -232,11 +251,17 @@
         <div class="controls">
             <div class="control-group">
                 <span class="control-label">时间粒度：</span>
-                <button onclick="setGranularity('fivemin')" id="btn-fivemin">按 5 分钟</button>
-                <button onclick="setGranularity('halfhour')" id="btn-halfhour">按半小时</button>
-                <button onclick="setGranularity('hour')" id="btn-hour" class="active">按小时</button>
-                <button onclick="setGranularity('day')" id="btn-day">按天</button>
-                <button onclick="setGranularity('month')" id="btn-month">按月</button>
+                <div id="granularity-btn-group" style="display:flex;gap:10px;">
+                    <button onclick="setGranularity('fivemin')" id="btn-fivemin">按 5 分钟</button>
+                    <button onclick="setGranularity('halfhour')" id="btn-halfhour">按半小时</button>
+                    <button onclick="setGranularity('hour')" id="btn-hour" class="active">按小时</button>
+                    <button onclick="setGranularity('day')" id="btn-day">按天</button>
+                    <button onclick="setGranularity('month')" id="btn-month">按月</button>
+                </div>
+            </div>
+            <div class="control-group">
+                <span class="control-label">时区：</span>
+                <select id="tz-select" onchange="setTimezone(this.value)"></select>
             </div>
             <div class="control-group">
                 <button onclick="fetchData()" id="btn-refresh">🔄 刷新</button>
@@ -262,10 +287,37 @@
         let currentGranularity = 'hour';
         let autoRefreshInterval;
 
+        // 精选时区列表（按 UTC 排序）
+        const TIMEZONES = [
+            { label: '美国-洛杉矶', value: -480 },
+            { label: '美国-纽约', value: -300 },
+            { label: '英国', value: 0 },
+            { label: '法国', value: 60 },
+            { label: '俄罗斯-莫斯科', value: 180 },
+            { label: '中国', value: 480 },
+            { label: '日本', value: 540 },
+            { label: '韩国', value: 540 },
+            { label: '新西兰', value: 720 },
+        ];
+
+        // 从 localStorage 读取时区，默认 UTC+8（480 分钟）
+        let currentTzOffset = parseInt(localStorage.getItem('tzOffset') ?? '480');
+        const VALID_OFFSETS = TIMEZONES.map(t => t.value);
+        if (!VALID_OFFSETS.includes(currentTzOffset)) currentTzOffset = 480;
+
         // 初始化
         document.addEventListener('DOMContentLoaded', () => {
             chart = echarts.init(document.getElementById('chart'));
             window.addEventListener('resize', () => chart.resize());
+
+            // 初始化时区下拉框
+            const tzSelect = document.getElementById('tz-select');
+            tzSelect.innerHTML = TIMEZONES.map(tz => {
+                const offsetHours = tz.value / 60;
+                const offsetStr = offsetHours === 0 ? 'UTC+0' :
+                                 offsetHours > 0 ? `UTC+${offsetHours}` : `UTC${offsetHours}`;
+                return `<option value="${tz.value}" ${currentTzOffset === tz.value ? 'selected' : ''}>${tz.label} ${offsetStr}</option>`;
+            }).join('');
 
             // 首次加载
             fetchData();
@@ -282,13 +334,64 @@
         function setGranularity(granularity) {
             currentGranularity = granularity;
 
-            // 更新按钮状态
-            document.querySelectorAll('.control-group button').forEach(btn => {
+            // 只更新粒度按钮组的状态
+            document.querySelectorAll('#granularity-btn-group button').forEach(btn => {
                 btn.classList.remove('active');
             });
             document.getElementById(`btn-${granularity}`).classList.add('active');
 
             fetchData();
+        }
+
+        // 切换时区
+        function setTimezone(offset) {
+            currentTzOffset = parseInt(offset);
+            localStorage.setItem('tzOffset', String(currentTzOffset));
+            fetchData();
+            fetchLatest();
+        }
+
+        // 将 UTC 时间字符串偏移指定分钟数后返回同格式字符串
+        function shiftUTCTime(utcStr, offsetMinutes) {
+            if (!utcStr) return utcStr;
+            const isYearMonth = /^\d{4}-\d{2}$/.test(utcStr);
+            const isDate = /^\d{4}-\d{2}-\d{2}$/.test(utcStr);
+
+            let ms;
+            if (isYearMonth) {
+                ms = Date.UTC(
+                    parseInt(utcStr.slice(0, 4)),
+                    parseInt(utcStr.slice(5, 7)) - 1,
+                    1, 0, 0, 0
+                );
+            } else if (isDate) {
+                ms = Date.UTC(
+                    parseInt(utcStr.slice(0, 4)),
+                    parseInt(utcStr.slice(5, 7)) - 1,
+                    parseInt(utcStr.slice(8, 10)),
+                    0, 0, 0
+                );
+            } else {
+                ms = Date.UTC(
+                    parseInt(utcStr.slice(0, 4)),
+                    parseInt(utcStr.slice(5, 7)) - 1,
+                    parseInt(utcStr.slice(8, 10)),
+                    parseInt(utcStr.slice(11, 13)),
+                    parseInt(utcStr.slice(14, 16)),
+                    0
+                );
+            }
+
+            const shifted = new Date(ms + offsetMinutes * 60000);
+            const Y = shifted.getUTCFullYear();
+            const M = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+            const D = String(shifted.getUTCDate()).padStart(2, '0');
+            const h = String(shifted.getUTCHours()).padStart(2, '0');
+            const m = String(shifted.getUTCMinutes()).padStart(2, '0');
+
+            if (isYearMonth) return `${Y}-${M}`;
+            if (isDate) return `${Y}-${M}-${D}`;
+            return `${Y}-${M}-${D} ${h}:${m}`;
         }
 
         // 获取最新数据
@@ -355,6 +458,7 @@
                         limit = 24; // 24 个月
                         break;
                 }
+                limit = limit * 2; // 因为每个时间点有 US 和 CN 两条数据，所以乘以 2
 
                 const res = await fetch(`${API_URL}/api/aggregated?granularity=${currentGranularity}&limit=${limit}`);
                 if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
@@ -389,13 +493,13 @@
             const usData = data.filter(d => d.region === 'US');
             const cnData = data.filter(d => d.region === 'CN');
 
-            // 提取时间轴，使用中国时区格式化
-            const baseData = usData.length >= cnData.length ? usData : cnData;
-            const times = baseData.map(d => {
-                // 将 time 字符串转换为中国时区显示
-                // API 返回的 time 是 UTC 时间，需要转换为 UTC+8
-                return d.time; // API 已经返回格式化的字符串，直接使用
-            });
+            // 对 time 字段做时区偏移（后端返回 UTC，前端加偏移显示）
+            const shiftedUsData = usData.map(d => ({ ...d, time: shiftUTCTime(d.time, currentTzOffset) }));
+            const shiftedCnData = cnData.map(d => ({ ...d, time: shiftUTCTime(d.time, currentTzOffset) }));
+
+            // 提取时间轴
+            const baseData = shiftedUsData.length >= shiftedCnData.length ? shiftedUsData : shiftedCnData;
+            const times = baseData.map(d => d.time);
 
             // 获取粒度标题
             let granularityTitle;
@@ -431,8 +535,8 @@
                         let html = `<strong>${params[0].axisValue}</strong><br/>`;
                         params.forEach(item => {
                             const dataItem = item.seriesName.includes('US') ?
-                                usData.find(d => d.time === item.axisValue) :
-                                cnData.find(d => d.time === item.axisValue);
+                                shiftedUsData.find(d => d.time === item.axisValue) :
+                                shiftedCnData.find(d => d.time === item.axisValue);
 
                             if (dataItem) {
                                 html += `${item.marker} ${item.seriesName}: <strong>${Math.round(item.value)}</strong> 人<br/>`;
@@ -512,7 +616,7 @@
                         name: '国际区 (US)',
                         type: 'line',
                         yAxisIndex: 0,
-                        data: usData.map(d => Math.round(d.avg_count)),
+                        data: shiftedUsData.map(d => Math.round(d.avg_count)),
                         showSymbol: false,
                         smooth: true,
                         lineStyle: {
@@ -530,7 +634,7 @@
                         name: '中国区 (CN)',
                         type: 'line',
                         yAxisIndex: 1,
-                        data: cnData.map(d => Math.round(d.avg_count)),
+                        data: shiftedCnData.map(d => Math.round(d.avg_count)),
                         showSymbol: false,
                         smooth: true,
                         lineStyle: {
@@ -550,18 +654,14 @@
             chart.setOption(option, true);
         }
 
-        // 格式化时间（中国时区 UTC+8）
+        // 格式化时间（根据当前时区偏移）
         function formatTime(timestamp) {
-            // 创建中国时区的日期对象
-            const date = new Date(timestamp);
-
-            // 转换为中国时区（UTC+8）
-            const chinaTime = new Date(date.getTime() + (8 * 60 * 60 * 1000) - (date.getTimezoneOffset() * 60 * 1000));
-
-            const month = String(chinaTime.getUTCMonth() + 1).padStart(2, '0');
-            const day = String(chinaTime.getUTCDate()).padStart(2, '0');
-            const hours = String(chinaTime.getUTCHours()).padStart(2, '0');
-            const minutes = String(chinaTime.getUTCMinutes()).padStart(2, '0');
+            // timestamp 是 Unix 毫秒，加上时区偏移后用 UTC 方法读取
+            const d = new Date(timestamp + currentTzOffset * 60000);
+            const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+            const day = String(d.getUTCDate()).padStart(2, '0');
+            const hours = String(d.getUTCHours()).padStart(2, '0');
+            const minutes = String(d.getUTCMinutes()).padStart(2, '0');
             return `${month}-${day} ${hours}:${minutes}`;
         }
 
