@@ -489,39 +489,48 @@
 
         // 渲染图表
         function renderChart(data) {
-            // 数据分组
-            const usData = data.filter(d => d.region === 'US');
-            const cnData = data.filter(d => d.region === 'CN');
+            // 1. 数据分组
+            const usDataMap = new Map();
+            const cnDataMap = new Map();
+            const allTimesSet = new Set();
 
-            // 对 time 字段做时区偏移（后端返回 UTC，前端加偏移显示）
-            const shiftedUsData = usData.map(d => ({ ...d, time: shiftUTCTime(d.time, currentTzOffset) }));
-            const shiftedCnData = cnData.map(d => ({ ...d, time: shiftUTCTime(d.time, currentTzOffset) }));
+            // 2. 将数据存入 Map，方便根据时间快速查找，同时收集所有时间点
+            data.forEach(d => {
+                const shiftedTime = shiftUTCTime(d.time, currentTzOffset);
+                allTimesSet.add(shiftedTime);
+                if (d.region === 'US') {
+                    usDataMap.set(shiftedTime, d);
+                } else if (d.region === 'CN') {
+                    cnDataMap.set(shiftedTime, d);
+                }
+            });
 
-            // 提取时间轴
-            const baseData = shiftedUsData.length >= shiftedCnData.length ? shiftedUsData : shiftedCnData;
-            const times = baseData.map(d => d.time);
+            // 3. 时间轴排序（确保图表从左到右时间递增）
+            const sortedTimes = Array.from(allTimesSet).sort();
 
-            // 获取粒度标题
-            let granularityTitle;
-            switch (currentGranularity) {
-                case 'fivemin':
-                    granularityTitle = '按 5 分钟';
-                    break;
-                case 'halfhour':
-                    granularityTitle = '按半小时';
-                    break;
-                case 'hour':
-                    granularityTitle = '按小时';
-                    break;
-                case 'day':
-                    granularityTitle = '按天';
-                    break;
-                case 'month':
-                    granularityTitle = '按月';
-                    break;
-            }
+            // 4. 根据排序后的统一时间轴，重新构造两个区域的数据序列
+            // 如果某个时间点缺失数据，填充 null，防止下标错位
+            const finalUsSeries = sortedTimes.map(t => {
+                const item = usDataMap.get(t);
+                return item ? Math.round(item.avg_count) : null;
+            });
 
-            // 配置图表
+            const finalCnSeries = sortedTimes.map(t => {
+                const item = cnDataMap.get(t);
+                return item ? Math.round(item.avg_count) : null;
+            });
+
+            // 5. 获取粒度标题
+            const granularityMap = {
+                'fivemin': '按 5 分钟',
+                'halfhour': '按半小时',
+                'hour': '按小时',
+                'day': '按天',
+                'month': '按月'
+            };
+            const granularityTitle = granularityMap[currentGranularity] || '';
+
+            // 6. 配置图表
             const option = {
                 title: {
                     text: `LeetCode Two-Sum 在线人数趋势（${granularityTitle}）`,
@@ -534,13 +543,15 @@
                     formatter: function(params) {
                         let html = `<strong>${params[0].axisValue}</strong><br/>`;
                         params.forEach(item => {
-                            const dataItem = item.seriesName.includes('US') ?
-                                shiftedUsData.find(d => d.time === item.axisValue) :
-                                shiftedCnData.find(d => d.time === item.axisValue);
-
-                            if (dataItem) {
-                                html += `${item.marker} ${item.seriesName}: <strong>${Math.round(item.value)}</strong> 人<br/>`;
-                                html += `<span style="color:#999;font-size:12px">  └ 范围: ${dataItem.min_count} - ${dataItem.max_count}</span><br/>`;
+                            // 从 Map 中获取原始数据点，以展示 min/max 详情
+                            const sourceMap = item.seriesName.includes('US') ? usDataMap : cnDataMap;
+                            const d = sourceMap.get(item.axisValue);
+                            
+                            if (d && item.value !== null) {
+                                html += `${item.marker} ${item.seriesName}: <strong>${item.value}</strong> 人<br/>`;
+                                html += `<span style="color:#999;font-size:12px">   └ 范围: ${d.min_count} - ${d.max_count}</span><br/>`;
+                            } else {
+                                html += `${item.marker} ${item.seriesName}: <strong>无数据</strong><br/>`;
                             }
                         });
                         return html;
@@ -573,10 +584,10 @@
                 xAxis: {
                     type: 'category',
                     boundaryGap: false,
-                    data: times,
+                    data: sortedTimes, // 使用排序后的统一时间轴
                     axisLabel: {
                         rotate: 45,
-                        interval: Math.floor(times.length / 10) || 0
+                        interval: Math.floor(sortedTimes.length / 10) || 0
                     }
                 },
                 yAxis: [
@@ -616,9 +627,10 @@
                         name: '国际区 (US)',
                         type: 'line',
                         yAxisIndex: 0,
-                        data: shiftedUsData.map(d => Math.round(d.avg_count)),
+                        data: finalUsSeries, // 使用对齐后的数据
                         showSymbol: false,
                         smooth: true,
+                        connectNulls: true, // 重要：如果中间缺数，是否把线连起来（建议设为 true）
                         lineStyle: {
                             width: 2,
                             color: '#5470C6'
@@ -634,9 +646,10 @@
                         name: '中国区 (CN)',
                         type: 'line',
                         yAxisIndex: 1,
-                        data: shiftedCnData.map(d => Math.round(d.avg_count)),
+                        data: finalCnSeries, // 使用对齐后的数据
                         showSymbol: false,
                         smooth: true,
+                        connectNulls: true,
                         lineStyle: {
                             width: 2,
                             color: '#91CC75'

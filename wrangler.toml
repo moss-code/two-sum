@@ -17,3 +17,20 @@ database_id = "36ece8dc-52e2-4abd-87be-8eccfd5b6b49"  # 替换为实际的 datab
 [triggers]
 crons = ["*/2 * * * *"]
 
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+persist = true
+head_sampling_rate = 1
+
+
+
