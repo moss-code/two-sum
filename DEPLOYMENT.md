@@ -29,16 +29,17 @@ npx wrangler secret put PROXY_URL
 npx wrangler secret put PROXY_API_KEY
 ~~~
 
-4. 先手动发布 Worker，再推送 GitHub 触发前端自动部署：
+4. 发布 Worker，并部署现有 Pages 项目的前端：
 
 ~~~sh
 npm run deploy
 git push origin main
+npm run pages:deploy
 ~~~
 
-前端使用仓库既有的 GitHub 自动部署；不要在后端迁移、发布完成前推送依赖新 API 的界面。
+2026-10-19 实测：GitHub 推送会触发 `Workers Builds: two-sum`，发布 Worker；`two-sum-web` Pages 项目未连接 Git Provider，前端需要单独执行 pages:deploy。先处理后端迁移，再发布依赖新 API 的界面。
 Worker 保留 api.twosum.icu 的现有域名绑定；Pages 项目保持 two-sum-web 和 twosum.icu。
-如果需要绕过 GitHub 做一次手动 Pages 发布，可以另用 npm run pages:deploy。
+以后若重新配置自动部署，以实际流水线和站点内容核验为准。
 前端生产 API 地址在 public/app.js 的 API 常量中；本地自动访问 localhost:8787。
 前端仍使用原项目的 ECharts 5.4.3 CDN，不需要构建步骤。
 
