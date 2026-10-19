@@ -1,363 +1,137 @@
-/**
- * LeetCode Two-Sum 在线人数监控 Worker
- * 功能：
- * 1. 定时采集 US 和 CN 区的在线人数（Cron）
- * 2. 提供 API 给前端查询历史数据（Fetch）
- */
-import getOnlineCount from "./collector";
+import getOnlineCount from './collector.js';
+import { REGIONS, PROFILES, bucketStart, shiftBucket, saveSamples } from './storage.js';
+
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+  'Access-Control-Max-Age': '86400',
+};
+const ROUTES = new Set(['/api/data', '/api/aggregated', '/api/latest', '/api/stats']);
+const json = (data, status = 200, extra = {}) => new Response(JSON.stringify(data), {
+  status, headers: { ...CORS, 'Content-Type': 'application/json; charset=utf-8', ...extra },
+});
+
+function integerParam(params, key, fallback, maximum) {
+  if (!params.has(key)) return fallback;
+  const value = params.get(key);
+  if (!/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > maximum) {
+    throw new RangeError(`${key} must be an integer between 1 and ${maximum}`);
+  }
+  return Number(value);
+}
+
+function parameters(url) {
+  if (url.pathname === '/api/aggregated') {
+    const granularity = url.searchParams.get('granularity') ?? 'hour';
+    const profile = Object.hasOwn(PROFILES, granularity) && PROFILES[granularity];
+    if (!profile) throw new RangeError('granularity must be hour, day or month');
+    return { granularity, limit: integerParam(url.searchParams, 'limit', profile.limit, profile.maximum) };
+  }
+  if (url.pathname === '/api/data') return { hours: integerParam(url.searchParams, 'hours', 24, 168) };
+  return {};
+}
+
+function logUsage(route, results) {
+  console.log(JSON.stringify({ route, rows_read: results.reduce((n, r) => n + (r.meta?.rows_read || 0), 0),
+    rows_written: results.reduce((n, r) => n + (r.meta?.rows_written || 0), 0) }));
+}
+
+async function readData(db, route, params) {
+  const now = Date.now();
+  if (route === '/api/aggregated') {
+    const { granularity, limit } = params;
+    const end = bucketStart(now, granularity);
+    const start = shiftBucket(end, granularity, 1 - limit);
+    const results = await db.batch(REGIONS.map(region => db.prepare(`
+      SELECT region, bucket AS timestamp, min_count, max_count,
+        1.0 * sum_count / sample_count AS avg_count, sample_count
+      FROM aggregates WHERE granularity = ? AND region = ? AND bucket >= ? AND bucket <= ?
+      ORDER BY bucket DESC LIMIT ?`).bind(granularity, region, start, end, limit)));
+    logUsage(route, results);
+    return results.flatMap(r => r.results).sort((a, b) => a.timestamp - b.timestamp || a.region.localeCompare(b.region))
+      .map(row => ({ ...row, time: new Date(row.timestamp).toISOString().slice(0,
+        granularity === 'hour' ? 16 : granularity === 'day' ? 10 : 7).replace('T', ' ') }));
+  }
+  if (route === '/api/latest') {
+    const results = await db.batch(REGIONS.map(region => db.prepare(`
+      SELECT region, count, timestamp FROM records WHERE region = ? ORDER BY timestamp DESC LIMIT 1`).bind(region)));
+    logUsage(route, results);
+    return { US: results[0].results[0] || null, CN: results[1].results[0] || null, updated_at: new Date(now).toISOString() };
+  }
+  if (route === '/api/data') {
+    const result = await db.prepare(`SELECT region, count, timestamp FROM records
+      WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC LIMIT 10000`)
+      .bind(now - params.hours * 3600000, now).all();
+    logUsage(route, [result]);
+    return result.results;
+  }
+  const result = await db.prepare(`SELECT region, SUM(sample_count) AS count,
+    MIN(min_count) AS min, MAX(max_count) AS max, 1.0 * SUM(sum_count) / SUM(sample_count) AS avg
+    FROM aggregates WHERE granularity = 'month' GROUP BY region`).all();
+  logUsage(route, [result]);
+  return { total_records: result.results.reduce((n, r) => n + r.count, 0), by_region: result.results };
+}
 
 export default {
-  /**
-   * HTTP 请求处理器
-   */
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
-
-    // CORS 头设置
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Max-Age": "86400",
-    };
-
-    // 处理 OPTIONS 预检请求
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
+    if (!ROUTES.has(url.pathname)) {
+      return url.pathname === '/' && request.method === 'GET'
+        ? json({ name: 'LeetCode Two-Sum Monitor API', version: '2.0.0', granularities: ['hour', 'day', 'month'] })
+        : json({ error: 'Not found' }, 404);
     }
-
+    if (request.method !== 'GET') return json({ error: 'Method not allowed' }, 405, { Allow: 'GET, OPTIONS' });
     try {
-      // API 路由
-      if (url.pathname === "/api/data") {
-        return await handleDataAPI(env, url, corsHeaders);
-      }
-
-      // 新增：按粒度聚合数据 API
-      if (url.pathname === "/api/aggregated") {
-        return await handleAggregatedAPI(env, url, corsHeaders);
-      }
-
-      if (url.pathname === "/api/latest") {
-        return await handleLatestAPI(env, corsHeaders);
-      }
-
-      if (url.pathname === "/api/stats") {
-        return await handleStatsAPI(env, corsHeaders);
-      }
-
-      // 接收采集器推送的数据
-      if (url.pathname === "/api/push" && request.method === "POST") {
-        return await handlePushAPI(request, env, corsHeaders);
-      }
-
-      // 默认响应
-      return jsonResponse({
-        name: "LeetCode Two-Sum Monitor API",
-        version: "1.0.0",
-        endpoints: {
-          "/api/data": "获取历史数据（支持 ?hours=24 参数）",
-          "/api/latest": "获取最新数据",
-          "/api/stats": "获取统计信息",
-          "/api/aggregated": "获取按粒度聚合的数据（支持 ?granularity=fivemin|halfhour|hour|day|month 参数）",
+      const params = parameters(url);
+      const cacheURL = new URL(url.pathname, url.origin);
+      cacheURL.search = new URLSearchParams({ v: 'rollup-max-1', ...params }).toString();
+      const cacheKey = new Request(cacheURL.toString());
+      const cache = globalThis.caches?.default;
+      try {
+        const hit = await cache?.match(cacheKey);
+        if (hit) {
+          const headers = new Headers(hit.headers);
+          headers.set('X-Cache', 'HIT');
+          return new Response(hit.body, { status: hit.status, headers });
         }
-      }, corsHeaders);
-
+      } catch (error) { console.warn('Cache read failed:', error.message); }
+      const response = json(await readData(env.DB, url.pathname, params), 200,
+        { 'Cache-Control': 'public, max-age=120', 'X-Cache': 'MISS' });
+      try { await cache?.put(cacheKey, response.clone()); }
+      catch (error) { console.warn('Cache write failed:', error.message); }
+      return response;
     } catch (error) {
-      console.error("Error handling request:", error);
-      return jsonResponse({
-        error: "Internal Server Error",
-        message: error.message
-      }, corsHeaders, 500);
+      if (error instanceof RangeError) return json({ error: error.message }, 400);
+      console.error('API failed:', error.message);
+      return json({ error: '数据暂时不可用，请稍后重试' }, 500);
     }
   },
 
-  /**
-   * 定时任务处理器
-   * 注意：由于 Workers 不支持 WebSocket 客户端，定时任务已移至外部采集脚本
-   */
   async scheduled(event, env, ctx) {
-    console.log("Cron triggered at:", new Date(event.scheduledTime).toISOString());
-    console.log("Note: Data collection is now handled by external collector script");
-    // 可以在这里添加其他定时任务，如数据清理等
-    ctx.waitUntil(collectDataCron(env));
-  }
+    const timestamp = Number.isFinite(event.scheduledTime) ? event.scheduledTime : Date.now();
+    ctx.waitUntil(collect(env, timestamp));
+  },
 };
 
-
-/**
- * 获取历史数据 API
- */
-async function handleDataAPI(env, url, corsHeaders) {
-  const hours = parseInt(url.searchParams.get('hours')) || 24;
-  const limit = Math.min(hours * 60 * 2, 10000); // 限制最多 10000 条
-
-  const { results } = await env.DB.prepare(
-    `SELECT region, count, timestamp
-     FROM records
-     ORDER BY timestamp DESC
-     LIMIT ?`
-  ).bind(limit).all();
-
-  return jsonResponse(results.reverse(), corsHeaders);
-}
-
-/**
- * 按粒度聚合数据 API
- * 支持按 5 分钟、半小时、小时、天、月聚合
- */
-async function handleAggregatedAPI(env, url, corsHeaders) {
-  const granularity = url.searchParams.get('granularity') || 'hour'; // fivemin, halfhour, hour, day, month
-  const limit = parseInt(url.searchParams.get("limit")) || 336; // 默认限制
-
-  if (limit <= 0 || limit > 336 * 2) {
-    return jsonResponse({ error: 'Invalid limit. Use a value between 1 and 336' }, corsHeaders, 400);
-  }
-
-  let timeFormat, groupBy;
-
-  switch (granularity) {
-    case 'fivemin':
-      // 按 5 分钟聚合：格式为 "YYYY-MM-DD HH:MM"（UTC）
-      // 将分钟数归类到 00, 05, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55
-      timeFormat = `strftime('%Y-%m-%d %H:', datetime(timestamp/1000, 'unixepoch')) ||
-                    CASE
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 5 THEN '00'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 10 THEN '05'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 15 THEN '10'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 20 THEN '15'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 25 THEN '20'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 30 THEN '25'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 35 THEN '30'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 40 THEN '35'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 45 THEN '40'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 50 THEN '45'
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 55 THEN '50'
-                      ELSE '55'
-                    END`;
-      groupBy = timeFormat;
-      break;
-    case 'halfhour':
-      // 按半小时聚合：格式为 "YYYY-MM-DD HH:00" 或 "YYYY-MM-DD HH:30"（UTC）
-      timeFormat = `strftime('%Y-%m-%d %H:', datetime(timestamp/1000, 'unixepoch')) ||
-                    CASE
-                      WHEN CAST(strftime('%M', datetime(timestamp/1000, 'unixepoch')) AS INTEGER) < 30 THEN '00'
-                      ELSE '30'
-                    END`;
-      groupBy = timeFormat;
-      break;
-    case 'hour':
-      // 按小时聚合：格式为 "YYYY-MM-DD HH:00"（UTC）
-      timeFormat = "strftime('%Y-%m-%d %H:00', datetime(timestamp/1000, 'unixepoch'))";
-      groupBy = timeFormat;
-      break;
-    case 'day':
-      // 按天聚合：格式为 "YYYY-MM-DD"（UTC）
-      timeFormat = "strftime('%Y-%m-%d', datetime(timestamp/1000, 'unixepoch'))";
-      groupBy = timeFormat;
-      break;
-    case 'month':
-      // 按月聚合：格式为 "YYYY-MM"（UTC）
-      timeFormat = "strftime('%Y-%m', datetime(timestamp/1000, 'unixepoch'))";
-      groupBy = timeFormat;
-      break;
-    default:
-      return jsonResponse({ error: 'Invalid granularity. Use: fivemin, halfhour, hour, day, or month' }, corsHeaders, 400);
-  }
-
-  const { results } = await env.DB.prepare(
-    `SELECT
-       region,
-       ${timeFormat} as time,
-       AVG(count) as avg_count,
-       MIN(count) as min_count,
-       MAX(count) as max_count,
-       COUNT(*) as sample_count
-     FROM records
-     GROUP BY region, ${groupBy}
-     ORDER BY timestamp DESC
-     LIMIT ?`
-  ).bind(limit).all();
-
-  return jsonResponse(results.reverse(), corsHeaders);
-}
-
-/**
- * 获取最新数据 API
- */
-async function handleLatestAPI(env, corsHeaders) {
-  const { results } = await env.DB.prepare(
-    `SELECT region, count, timestamp
-     FROM records
-     WHERE region IN ('US', 'CN')
-     ORDER BY timestamp DESC
-     LIMIT 2`
-  ).all();
-
-  const latest = {
-    US: results.find(r => r.region === 'US') || null,
-    CN: results.find(r => r.region === 'CN') || null,
-    updated_at: new Date().toISOString()
-  };
-
-  return jsonResponse(latest, corsHeaders);
-}
-
-/**
- * 获取统计信息 API
- */
-async function handleStatsAPI(env, corsHeaders) {
-  const { results: counts } = await env.DB.prepare(
-    `SELECT COUNT(*) as total FROM records`
-  ).all();
-
-  const { results: regions } = await env.DB.prepare(
-    `SELECT region, COUNT(*) as count,
-            MIN(count) as min,
-            MAX(count) as max,
-            AVG(count) as avg
-     FROM records
-     GROUP BY region`
-  ).all();
-
-  return jsonResponse({
-    total_records: counts[0]?.total || 0,
-    by_region: regions
-  }, corsHeaders);
-}
-
-
-/**
- * 推送数据到数据库（带超时和重试）
- * @param {object} env - 环境变量
- * @param {Array} records - 数据记录
- * @param {number} timeoutMs - 超时时间（毫秒）
- * @param {number} maxRetries - 最大重试次数
- * @returns {Promise<{success: boolean, saved: number, failed: number}>}
- */
-async function pushToDB(env, records, timeoutMs = 5000, maxRetries = 3) {
-  const RETRY_DELAY_MS = 1000;
-  let saved = 0;
-  let failed = 0;
-
-  for (const record of records) {
-    const { region, count, timestamp } = record;
-
-    let inserted = false;
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-
+async function collect(env, timestamp) {
+  async function collectRegion(region) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let timer;
       try {
-        // 添加超时控制
-        await Promise.race([
-          env.DB.prepare(
-            "INSERT INTO records (region, count, timestamp) VALUES (?, ?, ?)"
-          )
-            .bind(region, count, timestamp)
-            .run(),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("Timeout")), timeoutMs)
-          ),
-        ]);
-
-        console.log(
-          `[pushToDB] ✅ 保存成功: ${region} = ${count} at ${new Date(timestamp).toISOString()}`
-        );
-        saved++;
-        inserted = true;
-        break; // 成功，跳出重试循环
-
-      } catch (error) {
-        console.error(`[pushToDB] ❌ 错误: ${error.message}`);
-
-        if (attempt < maxRetries) {
-          console.log(`[pushToDB] 等待 ${RETRY_DELAY_MS}ms 后重试...`);
-          await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
-        }
-      }
+        const count = await Promise.race([getOnlineCount(region, env), new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Collection timed out')), 30000);
+        })]);
+        if (Number.isSafeInteger(count) && count >= 0) return { region, count, timestamp };
+      } catch (error) { console.warn(`[${region}] collection failed:`, error.message); }
+      finally { clearTimeout(timer); }
+      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 1000));
     }
-
-    if (!inserted) {
-      console.error(`[pushToDB] ❌ [${region}] 所有 ${maxRetries} 次尝试均失败`);
-      failed++;
-    }
-  }
-
-  console.log(`[pushToDB] 完成: 成功 ${saved} 条, 失败 ${failed} 条`);
-  return { success: failed === 0, saved, failed };
-}
-
-/**
- * 定时任务：并发获取 US 和 CN 两个地区的在线人数（带重试和超时）
- * @param {number} timeoutMs - 超时时间（毫秒）
- * @param {number} maxRetries - 每个地区最大重试次数
- * @returns {Promise<{US: number|null, CN: number|null}>}
- */
-async function collectDataCron(env, timeoutMs = 30000, maxRetries = 3) {
-  const RETRY_DELAY_MS = 1000;
-
-  async function fetchWithRetry(region, env) {
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      if (attempt > 1) {
-        console.log(`\n[${region}] --- 触发重试 ---`);
-      }
-
-      try {
-        const count = await Promise.race([
-          getOnlineCount(region, env),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("Timeout")), timeoutMs),
-          ),
-        ]);
-
-        if (count !== null) {
-          return count;
-        }
-
-        console.warn(`[${region}] ⚠️ 返回空数据`);
-      } catch (error) {
-        console.error(`[${region}] ❌ 错误: ${error.message}`);
-      }
-
-      if (attempt < maxRetries) {
-        console.log(`[${region}] 等待 ${RETRY_DELAY_MS}ms 后重试...`);
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
-      }
-    }
-
-    console.error(`[${region}] ❌ 所有 ${maxRetries} 次尝试均失败`);
+    console.warn(`[${region}] no valid sample`);
     return null;
   }
-
-  const [usCount, cnCount] = await Promise.all([
-    fetchWithRetry("US", env),
-    fetchWithRetry("CN", env),
-  ]);
-
-  let records = [];
-  if (usCount !== null) {
-    records.push({ region: "US", count: usCount, timestamp: Date.now() });
-  } else {
-    console.error("[US] ❌ 未能采集到数据");
-  }
-  if (cnCount !== null) {
-    records.push({ region: "CN", count: cnCount, timestamp: Date.now() });
-  } else {
-    console.error("[CN] ❌ 未能采集到数据");
-  }
-
-  await pushToDB(env, records);
-  
-}
-
-/**
- * 辅助函数：返回 JSON 响应
- */
-function jsonResponse(data, headers = {}, status = 200) {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: {
-      ...headers,
-      "Content-Type": "application/json; charset=utf-8"
-    }
-  });
+  const samples = (await Promise.all(REGIONS.map(collectRegion))).filter(Boolean);
+  const results = await saveSamples(env.DB, samples, timestamp);
+  logUsage('cron', results);
 }

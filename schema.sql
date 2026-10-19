@@ -1,8 +1,5 @@
--- 删除已存在的表（如果有）
-DROP TABLE IF EXISTS records;
-
 -- 创建记录表
-CREATE TABLE records (
+CREATE TABLE IF NOT EXISTS records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     region TEXT NOT NULL,           -- 区域：'CN' 或 'US'
     count INTEGER NOT NULL,         -- 在线人数
@@ -11,8 +8,8 @@ CREATE TABLE records (
 );
 
 -- 创建索引以提升查询性能
-CREATE INDEX idx_region_timestamp ON records(region, timestamp DESC);
-CREATE INDEX idx_timestamp ON records(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_region_timestamp ON records(region, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_timestamp ON records(timestamp DESC);
 
 -- 创建统计视图（可选，用于快速查询最新数据）
 CREATE VIEW IF NOT EXISTS latest_stats AS
