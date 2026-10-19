@@ -129,6 +129,12 @@ function renderChart(resetZoom = false) {
 
 async function request(path, signal) {
   const response = await fetch(`${API}${path}`, { signal });
+  if (response.status === 503) {
+    const body = await response.json().catch(() => null);
+    const error = new Error(typeof body?.error === 'string' ? body.error.slice(0, 300) : '数据暂时不可用，请稍后重试。');
+    error.status = 503;
+    throw error;
+  }
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
@@ -174,7 +180,8 @@ async function load(force = false, resetZoom = false) {
   chart?.hideLoading();
   renderLatest(); renderChart(resetZoom);
   errorBox.hidden = failures.length === 0;
-  errorBox.textContent = failures.length ? `${failures.join('、')}暂时不可用${cache.has(grain) || latest ? '，已保留上次成功的数据' : ''}。可点击刷新重试。` : '';
+  const unavailable = [aggregateResult, latestResult].find(result => result.status === 'rejected' && result.reason?.status === 503);
+  errorBox.textContent = unavailable?.reason.message || (failures.length ? `${failures.join('、')}暂时不可用${cache.has(grain) || latest ? '，已保留上次成功的数据' : ''}。可点击刷新重试。` : '');
   $('[data-status]').textContent = failures.length ? '等待恢复 · 2 分钟后重试' : 'Cloudflare Workers · D1 · Pages';
   refresh.disabled = false; refresh.setAttribute('aria-busy', 'false');
   schedule();

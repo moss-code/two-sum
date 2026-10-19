@@ -127,6 +127,13 @@ async function createHarness(t, options = {}) {
   const modules = new Map();
   async function load(filename) {
     if (modules.has(filename)) return modules.get(filename);
+    if (filename.endsWith('.sql')) {
+      const module = new vm.SyntheticModule(['default'], function () {
+        this.setExport('default', fs.readFileSync(filename, 'utf8'));
+      }, { context, identifier: filename });
+      modules.set(filename, module);
+      return module;
+    }
     if (path.basename(filename).replace(/\.js$/, '') === 'collector') {
       const module = new vm.SyntheticModule(['default'], function () {
         this.setExport('default', async region => {

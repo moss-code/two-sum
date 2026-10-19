@@ -14,6 +14,54 @@ function assertNoRawReads(db) {
     'public aggregate/statistics reads must not scan raw records');
 }
 
+test('quota errors return an uncached 503 with the reset time', async t => {
+  const h = await createHarness(t);
+  h.db.batch = async () => { throw new Error("Your account has exceeded D1's free tier daily row read limit. [code: 7500]"); };
+  const response = await h.fetch('/api/aggregated');
+  assert.equal(response.status, 503);
+  assert.match((await response.json()).error, /08:00/);
+  assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  assert.ok(Number(response.headers.get('Retry-After')) > 0);
+  assert.equal(h.cache.entries.size, 0);
+});
+
+test('missing rollups return an initialization message instead of caching a failed result', async t => {
+  const h = await createHarness(t);
+  h.db.sqlite.exec('DROP TABLE aggregates');
+  const response = await h.fetch('/api/aggregated');
+  assert.equal(response.status, 503);
+  assert.match((await response.json()).error, /初始化/);
+  assert.equal(h.cache.entries.size, 0);
+});
+
+test('cron bootstraps missing historical rollups once, then returns to bounded updates', async t => {
+  const h = await createHarness(t);
+  h.db.sqlite.exec('DROP TABLE aggregates');
+  const old = Date.parse('2026-05-01T00:00:00Z');
+  h.raw('US', 1234, old);
+  await h.cron();
+  assert.equal(h.db.sqlite.prepare("SELECT max_count FROM aggregates WHERE granularity='month' AND region='US' AND bucket=?").get(old).max_count, 1234);
+  const fullBackfills = () => h.db.queries.filter(({ sql }) => /FROM records GROUP BY/.test(sql)).length;
+  assert.equal(fullBackfills(), 1);
+  await h.cron(FIXED_NOW + 120000);
+  assert.equal(fullBackfills(), 1);
+});
+
+test('failed bootstrap rolls back the whole schema/backfill and can retry on the next cron', async t => {
+  const h = await createHarness(t);
+  h.db.sqlite.exec('DROP TABLE aggregates');
+  h.raw('US', 40, CURRENT_HOUR - 10 * HOUR);
+  const originalBatch = h.db.batch.bind(h.db);
+  h.db.batch = statements => originalBatch([...statements, h.db.prepare('SELECT * FROM simulated_missing_table')]);
+  await assert.rejects(h.cron());
+  assert.equal(h.db.sqlite.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name='aggregates'").get().n, 0);
+  assert.equal(h.db.sqlite.prepare('SELECT COUNT(*) AS n FROM records').get().n, 1);
+  assert.equal(h.collector.calls.length, 0);
+  h.db.batch = originalBatch;
+  await h.cron();
+  assert.equal(h.db.sqlite.prepare("SELECT COUNT(*) AS n FROM aggregates WHERE granularity='month'").get().n, 2);
+});
+
 test('rollup migration preserves all history and merges maxima, sums and sample counts without averaging averages', t => {
   const db = createD1();
   t.after(() => db.sqlite.close());

@@ -1,5 +1,5 @@
 import getOnlineCount from './collector.js';
-import { REGIONS, PROFILES, bucketStart, shiftBucket, saveSamples } from './storage.js';
+import { REGIONS, PROFILES, bucketStart, shiftBucket, saveSamples, ensureAggregates, isMissingRollups } from './storage.js';
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -105,13 +105,25 @@ export default {
     } catch (error) {
       if (error instanceof RangeError) return json({ error: error.message }, 400);
       console.error('API failed:', error.message);
+      const detail = `${error.message} ${error.cause?.message || ''}`;
+      if (/free tier daily row (read|write) limit|code:?\s*7500/i.test(detail)) {
+        const now = new Date();
+        const reset = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+        return json({ error: '今日数据库免费额度已用完，将在北京时间 08:00 重置后自动恢复。' }, 503,
+          { 'Cache-Control': 'no-store', 'Retry-After': String(Math.max(1, Math.ceil((reset - Date.now()) / 1000))) });
+      }
+      if (isMissingRollups(error)) return json({ error: '历史数据正在等待初始化，定时任务完成后会自动恢复。' }, 503,
+        { 'Cache-Control': 'no-store', 'Retry-After': '120' });
       return json({ error: '数据暂时不可用，请稍后重试' }, 500);
     }
   },
 
   async scheduled(event, env, ctx) {
     const timestamp = Number.isFinite(event.scheduledTime) ? event.scheduledTime : Date.now();
-    ctx.waitUntil(collect(env, timestamp));
+    ctx.waitUntil((async () => {
+      await ensureAggregates(env.DB);
+      await collect(env, timestamp);
+    })());
   },
 };
 

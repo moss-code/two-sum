@@ -1,3 +1,5 @@
+import rollupMigration from '../migrations/0001_rollups.sql';
+
 export const REGIONS = ['US', 'CN'];
 export const PROFILES = { hour: { limit: 168, maximum: 336 }, day: { limit: 90, maximum: 180 }, month: { limit: 24, maximum: 48 } };
 
@@ -21,6 +23,21 @@ export function shiftBucket(timestamp, granularity, amount) {
 const UPSERT = `ON CONFLICT (granularity, region, bucket) DO UPDATE SET
   min_count = excluded.min_count, max_count = excluded.max_count,
   sum_count = excluded.sum_count, sample_count = excluded.sample_count`;
+
+export function isMissingRollups(error) {
+  return /no such table:\s*aggregates/i.test(`${error?.message || error} ${error?.cause?.message || ''}`);
+}
+
+export async function ensureAggregates(db) {
+  try { await db.prepare('SELECT 1 FROM aggregates LIMIT 1').first(); }
+  catch (error) {
+    if (!isMissingRollups(error)) throw error;
+    // Only Cron runs this recovery. Batch includes the DDL, so a failed backfill leaves no partial table.
+    const statements = rollupMigration.split(';').map(sql => sql.trim()).filter(Boolean);
+    await db.batch(statements.map(sql => db.prepare(sql)));
+    console.log('Historical rollups initialized');
+  }
+}
 
 export async function saveSamples(db, samples, timestamp) {
   const statements = samples.map(({ region, count, timestamp }) => db.prepare(`
